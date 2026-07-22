@@ -1,0 +1,49 @@
+id = "hs.jail"
+name = "Herdr Jail"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Run coding agents inside yolo-jail sandboxes: reuse a parent workspace's jail, enforce jailing for supported agents, and visualize running jails per workspace."
+platforms = ["macos", "linux"]
+
+# --- Feature #2 (sanctioned entry) + #1 (parent-jail reuse) ---
+# Launch the workspace's agent inside a jail. Wraps the agent in `yolo --`,
+# and if an ancestor directory already has a running jail in the SAME Herdr
+# workspace, prompts to reuse it instead of spawning a new one.
+[[actions]]
+id = "run"
+title = "Run agent in jail"
+description = "Launch a supported coding agent inside a yolo-jail (reusing a parent jail if one exists)."
+contexts = ["pane", "workspace"]
+command = ["bash", "bin/jail-run.sh"]
+
+# --- Manual migrate/handoff (recovery, not prevention) ---
+# Deliberately invoked: stop an un-jailed agent in the pane and relaunch it
+# jailed with session resume (claude: --continue). Never fired automatically.
+[[actions]]
+id = "migrate"
+title = "Migrate agent into jail"
+description = "Stop an un-jailed agent in this pane and relaunch it jailed, resuming the session where possible."
+contexts = ["pane"]
+command = ["bash", "bin/migrate.sh"]
+
+# --- Feature #2 (enforcement watchdog) ---
+# When Herdr detects a supported agent running OUTSIDE a jail, flag it.
+[[events]]
+on = "pane.agent_detected"
+command = ["bash", "bin/enforce.sh"]
+
+# --- Feature #3 (visualize jails per workspace) ---
+# A plugin-owned pane that renders running jails grouped under their Herdr
+# workspaces. (Herdr has no sidebar/tree extension API, so this is a pane TUI.)
+[[panes]]
+id = "tree"
+title = "Jail Tree"
+placement = "split"
+command = ["bash", "bin/jail-tree.sh"]
+
+[[actions]]
+id = "open-tree"
+title = "Open Jail Tree"
+description = "Show running yolo-jails grouped by Herdr workspace."
+contexts = ["workspace", "pane"]
+command = ["bash", "bin/open-tree.sh"]
