@@ -5,6 +5,13 @@ min_herdr_version = "0.7.0"
 description = "Run coding agents inside yolo-jail sandboxes: reuse a parent workspace's jail, enforce jailing for supported agents, and visualize running jails per workspace."
 platforms = ["macos", "linux"]
 
+# --- Feature #3 (native sidebar): keep each workspace row's $jails token live ---
+# Requires a matching row layout in ~/.config/herdr/config.toml:
+#   [ui.sidebar.spaces]
+#   rows = [["state_icon", "workspace"], ["branch", "git_status", "$jails"]]
+[[startup]]
+command = ["bash", "bin/jails-refresher.sh"]
+
 # --- Feature #2 (sanctioned entry) + #1 (parent-jail reuse) ---
 # Launch the workspace's agent inside a jail. Wraps the agent in `yolo --`,
 # and if an ancestor directory already has a running jail in the SAME Herdr

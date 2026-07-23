@@ -48,6 +48,25 @@ Requires Herdr 0.7.0+, yolo-jail, and Podman (as configured for yolo-jail).
 Set the agent with `HERDR_JAIL_AGENT` (default `claude`). Supported:
 `claude pi codex gemini opencode copilot`.
 
+## Jail indicator in the workspaces sidebar (native)
+
+Each workspace row can show a live jail count (🔒N) in Herdr's own sidebar —
+not a separate pane. A `[[startup]]` refresher keeps a `$jails` metadata token
+current per workspace (set on jail boot, cleared on stop).
+
+Herdr renders reported tokens only if the row layout references them, so add to
+`~/.config/herdr/config.toml`:
+
+```toml
+[ui.sidebar.spaces]
+rows = [["state_icon", "workspace"], ["branch", "git_status", "$jails"]]
+```
+
+Note: Herdr's plugin API cannot add a *new expandable node type* under a
+workspace (the workspace→tab→pane tree is fixed). This puts the jail indicator
+on the workspace's own row instead — the closest the native sidebar allows.
+The standalone Jail Tree pane remains for a full grouped view.
+
 ## Enforce jailing (auto-jail every agent in Herdr)
 
 The plugin actions above are opt-in (you invoke them). For **automatic**
