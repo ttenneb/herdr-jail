@@ -1,15 +1,19 @@
 #!/bin/sh
 # jail-shim — dispatch a bare agent command through yolo-jail.
 #
-# Installed (as a symlink named after each agent) into a shim dir that the
-# Herdr shell wrapper prepends to PATH. So typing `claude` in a Herdr pane
-# runs this, which re-execs it jailed as `yolo -- claude`.
+# Named per agent (claude, pi, ...) in a shim dir that the Herdr shell wrapper
+# prepends to PATH. Typing `claude` runs this, which launches it jailed.
 #
-# Escape hatch: YOLO_BYPASS=1 runs the real, un-jailed binary instead.
+# Parent-jail reuse (feature #1): if an ANCESTOR directory already has a
+# running jail, we launch from that ancestor and cd into the current subdir
+# INSIDE the jail — so the child agent joins the parent jail instead of
+# spawning a new one. (yolo mounts the whole workspace tree at /workspace, so
+# the subdir is present in the parent jail.)
+#
+# Escape hatch: YOLO_BYPASS=1 runs the real, un-jailed binary.
 agent="$(basename "$0")"
 shim_dir="$(cd "$(dirname "$0")" && pwd)"
 
-# Locate the real agent binary, excluding our own shim dir from PATH.
 real_binary() {
   clean_path="$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$shim_dir" | paste -sd: -)"
   PATH="$clean_path" command -v "$agent" 2>/dev/null || true
@@ -17,22 +21,56 @@ real_binary() {
 
 if [ "${YOLO_BYPASS:-}" = "1" ]; then
   real="$(real_binary)"
-  if [ -n "$real" ]; then
-    exec "$real" "$@"
-  fi
+  [ -n "$real" ] && exec "$real" "$@"
   echo "jail-shim: YOLO_BYPASS set but no un-jailed '$agent' found on PATH" >&2
   exit 127
 fi
 
-# Ensure yolo is reachable (it lives in Homebrew/Nix bins).
-if ! command -v yolo >/dev/null 2>&1; then
-  PATH="/opt/homebrew/bin:/usr/local/bin:/nix/var/nix/profiles/default/bin:$PATH"
-  export PATH
-fi
+# Ensure yolo + podman are reachable (Herdr gives plugin shells a minimal PATH).
+case ":$PATH:" in
+  *:/opt/homebrew/bin:*) : ;;
+  *) PATH="/opt/homebrew/bin:/usr/local/bin:/nix/var/nix/profiles/default/bin:$PATH"; export PATH ;;
+esac
 
 if ! command -v yolo >/dev/null 2>&1; then
   echo "jail-shim: yolo not found; cannot jail '$agent'. Set YOLO_BYPASS=1 to run un-jailed." >&2
   exit 127
 fi
 
+cwd="$(pwd -P 2>/dev/null || pwd)"
+
+# --- Parent-jail reuse: find a running jail rooted at an ANCESTOR of cwd ---
+# Query podman for yolo-* containers and their YOLO_HOST_DIR. Pick the DEEPEST
+# ancestor that is a strict parent of cwd (equal dir is handled by yolo natively).
+# is_ancestor <dir> <path> : true if <dir> is a strict parent of <path>
+is_ancestor() {
+  _a="${1%/}"; _p="${2%/}"
+  [ "$_a" != "$_p" ] && [ "${_p#"$_a"/}" != "$_p" ]
+}
+
+reuse_root=""
+if command -v podman >/dev/null 2>&1; then
+  _best=""; _bestlen=-1
+  for _name in $(podman ps --filter 'name=yolo-' --format '{{.Names}}' 2>/dev/null); do
+    [ -n "$_name" ] || continue
+    _hd="$(podman inspect "$_name" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | sed -n 's/^YOLO_HOST_DIR=//p' | head -1)"
+    [ -n "$_hd" ] || continue
+    if is_ancestor "$_hd" "$cwd"; then
+      _len=${#_hd}
+      if [ "$_len" -gt "$_bestlen" ]; then _best="$_hd"; _bestlen=$_len; fi
+    fi
+  done
+  reuse_root="$_best"
+fi
+
+if [ -n "$reuse_root" ]; then
+  # Relative path from the jail root to the current dir.
+  rel="${cwd#"$reuse_root"/}"
+  echo "jail-shim: joining parent jail at $reuse_root (subdir: $rel)" >&2
+  cd "$reuse_root" || exit 1
+  # Launch inside the parent jail, cd to the subdir, exec the agent there.
+  exec yolo -- sh -c 'cd "/workspace/$1" 2>/dev/null || cd /workspace; shift; exec "$@"' _ "$rel" "$agent" "$@"
+fi
+
+# No ancestor jail — normal per-dir jail.
 exec yolo -- "$agent" "$@"

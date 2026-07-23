@@ -14,6 +14,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 
 INTERVAL="${HERDR_JAIL_REFRESH_INTERVAL:-4}"
 TTL_MS=$(( (INTERVAL * 3) * 1000 ))
+MAX_JAIL_ROWS="${HERDR_JAIL_MAX_ROWS:-5}"
 # Nerd Font glyphs built from explicit codepoints (raw bytes don't survive
 # some editors/heredocs). U+E0A0 = pl-branch, U+F023 = fa-lock.
 GIT_ICON="${HERDR_JAIL_GIT_ICON:-$(printf '\xee\x82\xa0')}"   # U+E0A0 pl-branch
@@ -51,14 +52,23 @@ while true; do
       "$HERDR" workspace report-metadata "$wid" --source hs.jail \
         --clear-token giticon >/dev/null 2>&1 || true
     fi
-    # jail token only when the workspace has a jail
-    if [ -n "$label" ]; then
+    # one token per jail: jail1, jail2, ... (each renders on its own row).
+    # label is "|"-separated jail ids. Set present slots, clear the rest.
+    _i=1
+    _old_ifs="$IFS"; IFS='"'"'|'"'"'
+    for _jid in $label; do
+      [ -z "$_jid" ] && continue
       "$HERDR" workspace report-metadata "$wid" --source hs.jail \
-        --token jails="${LOCK_ICON} ${label}" --ttl-ms "$TTL_MS" >/dev/null 2>&1 || true
-    else
+        --token "jail${_i}=${LOCK_ICON} ${_jid}" --ttl-ms "$TTL_MS" >/dev/null 2>&1 || true
+      _i=$((_i + 1))
+    done
+    IFS="$_old_ifs"
+    # clear unused slots up to MAX_JAIL_ROWS
+    while [ "$_i" -le "$MAX_JAIL_ROWS" ]; do
       "$HERDR" workspace report-metadata "$wid" --source hs.jail \
-        --clear-token jails >/dev/null 2>&1 || true
-    fi
+        --clear-token "jail${_i}" >/dev/null 2>&1 || true
+      _i=$((_i + 1))
+    done
   done < <(python3 "$here/jails-status.py" --jails "$jf" --workspaces "$wf" --panes "$pf" 2>/dev/null)
 
   rm -f "$jf" "$wf" "$pf"

@@ -81,12 +81,15 @@ def main():
     for wid in per_ws:
         if not wid: continue
         names = per_ws[wid]
-        if names:
-            label = ",".join(short(n) for n in names)
-            if len(label) > MAX_LABEL:
-                label = label[:MAX_LABEL - 1] + "…"
-        else:
-            label = ""
+        # Emit one short id per jail, "|"-separated, so the refresher can place
+        # each on its own sidebar row (jail1, jail2, ...). Each id truncated.
+        parts = []
+        for n in names:
+            sid = short(n)
+            if len(sid) > MAX_LABEL:
+                sid = sid[:MAX_LABEL - 1] + "…"
+            parts.append(sid)
+        label = "|".join(parts)
         cwd = first_cwd.get(wid, "")
         if cwd not in git_cache:
             git_cache[cwd] = in_git_worktree(cwd)
