@@ -19,6 +19,21 @@ TTL_MS=$(( (INTERVAL * 3) * 1000 ))
 GIT_ICON="${HERDR_JAIL_GIT_ICON:-$(printf '\xee\x82\xa0')}"   # U+E0A0 pl-branch
 LOCK_ICON="${HERDR_JAIL_LOCK_ICON:-$(printf '\xef\x80\xa3')}"  # U+F023 fa-lock
 
+# Single-instance guard: if another refresher is already running, exit quietly.
+# Herdr's [[startup]] and manual launches could otherwise both run and fight.
+LOCK_DIR="${TMPDIR:-/tmp}/herdr-jail-refresher.lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  # Stale lock? Check for a live pid.
+  if [ -r "$LOCK_DIR/pid" ] && kill -0 "$(cat "$LOCK_DIR/pid" 2>/dev/null)" 2>/dev/null; then
+    log "another refresher is already running; exiting"
+    exit 0
+  fi
+  # stale — take it over
+  rm -rf "$LOCK_DIR" 2>/dev/null; mkdir "$LOCK_DIR" 2>/dev/null || exit 0
+fi
+echo "$$" > "$LOCK_DIR/pid"
+trap 'rm -rf "$LOCK_DIR"' EXIT INT TERM
+
 log "jails-refresher started (interval ${INTERVAL}s)"
 while true; do
   jf="$(mktemp)"; wf="$(mktemp)"; pf="$(mktemp)"
