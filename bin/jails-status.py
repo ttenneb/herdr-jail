@@ -1,26 +1,24 @@
 #!/usr/bin/env python3
-"""Compute the running jail(s) per Herdr workspace, keyed by jail id.
+"""Per-workspace sidebar facts for the herdr-jail refresher.
 
-Inputs (same sources as group.py):
+Inputs:
   --jails FILE       TSV: <container_name>\t<host_dir>
   --workspaces JSON  `herdr workspace list`
   --panes JSON       `herdr pane list`
 
-Output: one line per workspace:   <workspace_id>\t<label>
-where <label> is a compact jail identifier for the sidebar token, or empty if
-the workspace has no jail (caller clears the token). A jail counts toward the
-workspace whose pane resolves to it as the deepest ancestor jail.
+Output: one line per workspace:  <workspace_id>\t<has_git>\t<jail_label>
+  jail_label : dir-keyed jail id(s) (yolo name minus "yolo-"), or "" if none
+  has_git    : "1" if the workspace's primary dir is inside a git work tree,
+               else "0"  (lets the caller show a branch icon only where a
+               branch actually renders)
 
-The jail id shown is the yolo container name with the "yolo-" prefix stripped
-(i.e. "<basename>-<hash>", the dir-keyed id). If a workspace has multiple
-distinct jails, they're joined with "," (rare; usually one).
-
-Token VALUES have no length cap, but very long values may truncate visually in
-the sidebar. We therefore emit the shortest unambiguous form: the basename-hash.
+Attribution: a jail counts for the workspace whose pane resolves to it as the
+deepest ancestor jail. The workspace's "primary dir" for the git check is the
+cwd of its first pane.
 """
-import argparse, json, sys
+import argparse, json, os, subprocess, sys
 
-MAX_LABEL = 28  # keep the sidebar row tidy; truncate with an ellipsis beyond this
+MAX_LABEL = 28
 
 def anc(a, p):
     a = a.rstrip("/"); p = p.rstrip("/")
@@ -32,8 +30,18 @@ def load(path):
     except Exception: return {}
 
 def short(name):
-    # yolo-<basename>-<hash> -> <basename>-<hash>
     return name[5:] if name.startswith("yolo-") else name
+
+def in_git_worktree(path):
+    if not path or not os.path.isdir(path):
+        return False
+    try:
+        r = subprocess.run(
+            ["git", "-C", path, "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True, timeout=3)
+        return r.returncode == 0 and r.stdout.strip() == "true"
+    except Exception:
+        return False
 
 def main():
     ap = argparse.ArgumentParser()
@@ -55,10 +63,13 @@ def main():
     panes = load(a.panes).get("result", {}).get("panes", []) or []
 
     per_ws = {w.get("workspace_id"): [] for w in ws}
+    first_cwd = {}
     for p in panes:
         cwd = p.get("foreground_cwd") or p.get("cwd") or ""
         wid = p.get("workspace_id")
-        if not cwd or not wid: continue
+        if not wid: continue
+        first_cwd.setdefault(wid, cwd)
+        if not cwd: continue
         best, best_len = None, -1
         for name, hd in jails:
             if anc(hd, cwd) and len(hd.rstrip("/")) > best_len:
@@ -66,15 +77,22 @@ def main():
         if best is not None and wid in per_ws and best not in per_ws[wid]:
             per_ws[wid].append(best)
 
-    for wid, names in per_ws.items():
+    git_cache = {}
+    for wid in per_ws:
         if not wid: continue
+        names = per_ws[wid]
         if names:
             label = ",".join(short(n) for n in names)
             if len(label) > MAX_LABEL:
                 label = label[:MAX_LABEL - 1] + "…"
         else:
             label = ""
-        print(f"{wid}\t{label}")
+        cwd = first_cwd.get(wid, "")
+        if cwd not in git_cache:
+            git_cache[cwd] = in_git_worktree(cwd)
+        has_git = "1" if git_cache[cwd] else "0"
+        # label LAST: it may be empty, and trailing empty fields read cleanly
+        print(f"{wid}\t{has_git}\t{label}")
 
 if __name__ == "__main__":
     sys.exit(main())
