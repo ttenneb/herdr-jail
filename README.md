@@ -59,7 +59,7 @@ Herdr renders reported tokens only if the row layout references them, so add to
 
 ```toml
 [ui.sidebar.spaces]
-rows = [["state_icon", "workspace"], ["branch", "git_status", "$jails"]]
+rows = [["state_icon", "workspace"], ["branch", "git_status"], ["$jails"]]
 ```
 
 Note: Herdr's plugin API cannot add a *new expandable node type* under a
