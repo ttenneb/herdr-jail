@@ -1,0 +1,17 @@
+#!/bin/sh
+# herdr-jail-shell — Herdr `terminal.default_shell` wrapper that enforces jailing.
+#
+# Launches zsh with a custom ZDOTDIR (this plugin's zdotdir/) whose .zshrc
+# sources the user's real config first, then prepends the shim dir LAST — so
+# agent shims win the PATH race regardless of mise/pyenv/path_helper. The
+# user's own rc files are read, never modified.
+#
+# Disable by unsetting Herdr's default_shell. Bypass one command: YOLO_BYPASS=1 <agent>
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLUGIN_ROOT="$(cd "$SELF_DIR/.." && pwd)"
+
+export HERDR_JAIL_REAL_ZDOTDIR="${ZDOTDIR:-$HOME}"
+export HERDR_JAIL_SHIM_DIR="${HERDR_JAIL_SHIM_DIR:-$HOME/.herdr-jail-shims}"
+export ZDOTDIR="$PLUGIN_ROOT/zdotdir"
+
+exec /bin/zsh -i -l

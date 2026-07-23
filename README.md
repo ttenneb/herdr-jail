@@ -48,6 +48,36 @@ Requires Herdr 0.7.0+, yolo-jail, and Podman (as configured for yolo-jail).
 Set the agent with `HERDR_JAIL_AGENT` (default `claude`). Supported:
 `claude pi codex gemini opencode copilot`.
 
+## Enforce jailing (auto-jail every agent in Herdr)
+
+The plugin actions above are opt-in (you invoke them). For **automatic**
+jailing — where typing `claude`/`pi`/etc. in any Herdr pane always runs jailed —
+point Herdr's shell at the enforcing wrapper. This is shell-level, not a plugin
+action, because Herdr has no launch-interception hook.
+
+```sh
+# 1. Install the shims (symlinks per agent -> bin/jail-shim)
+bin/install-shims.sh                      # -> ~/.herdr-jail-shims
+
+# 2. Point Herdr at the enforcing shell — add to ~/.config/herdr/config.toml:
+[terminal]
+default_shell = "/ABSOLUTE/PATH/TO/herdr-jail/bin/herdr-jail-shell"
+
+# 3. Reload
+herdr server reload-config
+```
+
+Now every supported agent launched in a Herdr pane is auto-wrapped as
+`yolo -- <agent>`. Bypass a single invocation with `YOLO_BYPASS=1 <agent>`.
+
+**How it stays robust and non-invasive:** the wrapper launches zsh with a
+custom `ZDOTDIR` (`zdotdir/`) whose `.zshrc` sources *your* real config first
+(mise, pyenv, PATH edits, everything), then prepends the shim dir **last** — so
+the shims win the PATH race no matter what your config or macOS `path_helper`
+does. Your own rc files are read, never modified. Outside Herdr, nothing
+changes: your normal shells don't use this wrapper, so agents run un-jailed
+there as usual.
+
 ## How it works
 
 Herdr runs plugin `command`s as short-lived processes with context in env

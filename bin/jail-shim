@@ -1,0 +1,38 @@
+#!/bin/sh
+# jail-shim — dispatch a bare agent command through yolo-jail.
+#
+# Installed (as a symlink named after each agent) into a shim dir that the
+# Herdr shell wrapper prepends to PATH. So typing `claude` in a Herdr pane
+# runs this, which re-execs it jailed as `yolo -- claude`.
+#
+# Escape hatch: YOLO_BYPASS=1 runs the real, un-jailed binary instead.
+agent="$(basename "$0")"
+shim_dir="$(cd "$(dirname "$0")" && pwd)"
+
+# Locate the real agent binary, excluding our own shim dir from PATH.
+real_binary() {
+  clean_path="$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$shim_dir" | paste -sd: -)"
+  PATH="$clean_path" command -v "$agent" 2>/dev/null || true
+}
+
+if [ "${YOLO_BYPASS:-}" = "1" ]; then
+  real="$(real_binary)"
+  if [ -n "$real" ]; then
+    exec "$real" "$@"
+  fi
+  echo "jail-shim: YOLO_BYPASS set but no un-jailed '$agent' found on PATH" >&2
+  exit 127
+fi
+
+# Ensure yolo is reachable (it lives in Homebrew/Nix bins).
+if ! command -v yolo >/dev/null 2>&1; then
+  PATH="/opt/homebrew/bin:/usr/local/bin:/nix/var/nix/profiles/default/bin:$PATH"
+  export PATH
+fi
+
+if ! command -v yolo >/dev/null 2>&1; then
+  echo "jail-shim: yolo not found; cannot jail '$agent'. Set YOLO_BYPASS=1 to run un-jailed." >&2
+  exit 127
+fi
+
+exec yolo -- "$agent" "$@"
