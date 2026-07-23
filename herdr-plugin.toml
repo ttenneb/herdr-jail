@@ -54,3 +54,20 @@ title = "Open Jail Tree"
 description = "Show running yolo-jails grouped by Herdr workspace."
 contexts = ["workspace", "pane"]
 command = ["bash", "bin/open-tree.sh"]
+
+# --- Workspace context: open/close jails attached to a workspace ---
+# One static action (titles can't be dynamic per-jail); it opens a picker pane
+# that renders "Open/Close Jail XXX..." per jail at runtime.
+[[actions]]
+id = "jails"
+title = "Jails…"
+description = "Open or close the yolo-jails attached to this workspace."
+contexts = ["workspace"]
+menu_dynamic = true
+command = ["bash", "bin/jail-menu-provider.sh"]
+
+[[panes]]
+id = "jail-menu"
+title = "Jails"
+placement = "overlay"
+command = ["bash", "bin/jail-menu-ui.sh"]
