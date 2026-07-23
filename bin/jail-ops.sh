@@ -55,14 +55,29 @@ case "$op" in
     # container (lands at /workspace, the jail base).
     right="$(json_field "$("$HERDR" pane split "$left" --direction right --cwd "$jail_dir" --no-focus 2>/dev/null)" '.result.pane.pane_id')"
 
+    # A freshly-created pane's shell may not be ready to accept typed input
+    # immediately; `pane run` types text + Enter, so firing too early can drop
+    # or mangle the command. We first send a marker echo and wait for it to
+    # appear, which confirms the shell is at a prompt, THEN send the real
+    # command. We also DON'T use `exec`: if yolo/the agent exits (e.g. a cold
+    # first-run hiccup), the pane keeps its shell instead of closing.
+    wait_ready() {
+      # wait_ready <pane_id> — block until the pane's shell echoes a marker.
+      local pane="$1" marker="__hj_ready_$$"
+      "$HERDR" pane run "$pane" "printf '%s\n' $marker" >/dev/null 2>&1 || true
+      "$HERDR" pane wait-output "$pane" --match "$marker" --timeout 15000 >/dev/null 2>&1 || true
+    }
+
     # Left pane: run the agent, fresh chat, jailed, at the repo dir.
     # Bare "<kind>" (no --continue/--resume) starts a new chat.
-    "$HERDR" pane run "$left" "cd '$repo_dir' && exec yolo -- $kind" >/dev/null 2>&1 || true
+    wait_ready "$left"
+    "$HERDR" pane run "$left" "cd '$repo_dir' && clear && yolo -- $kind" >/dev/null 2>&1 || true
 
     # Right pane: interactive shell inside the jail. Bare `yolo` (no `--`) opens
     # an interactive jail shell at /workspace.
     if [ -n "$right" ] && [ "$right" != "null" ]; then
-      "$HERDR" pane run "$right" "cd '$jail_dir' && exec yolo" >/dev/null 2>&1 || true
+      wait_ready "$right"
+      "$HERDR" pane run "$right" "cd '$jail_dir' && clear && yolo" >/dev/null 2>&1 || true
     fi
 
     log "opened jail $jail: left=$left (agent $kind) right=$right (in-jail shell)"
