@@ -2,3 +2,5 @@
 *.log
 __pycache__/
 *.pyc
+zdotdir/.zsh_history
+.zsh_history
