@@ -17,3 +17,6 @@ fi
 # Now win the PATH race — prepend the shim dir last.
 export PATH="${HERDR_JAIL_SHIM_DIR:-$HOME/.herdr-jail-shims}:$PATH"
 export HERDR_JAIL_ENFORCED=1
+
+# Keep shell history in the user's real home, not this plugin dir.
+export HISTFILE="${HERDR_JAIL_REAL_ZDOTDIR:-$HOME}/.zsh_history"
