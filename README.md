@@ -57,9 +57,11 @@ current per workspace (set on jail boot, cleared on stop).
 Herdr renders reported tokens only if the row layout references them, so add to
 `~/.config/herdr/config.toml`:
 
+> Requires a Nerd Font in your terminal (uses  U+E0A0 branch and  U+F023 lock glyphs).
+
 ```toml
 [ui.sidebar.spaces]
-rows = [["state_icon", "workspace"], ["branch", "git_status"], ["$jails"]]
+rows = [["state_icon", "workspace"], ["$giticon", "branch", "git_status"], ["$jails"]]
 ```
 
 Note: Herdr's plugin API cannot add a *new expandable node type* under a
