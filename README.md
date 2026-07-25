@@ -36,7 +36,7 @@ herdr plugin list        # should show hs.jail
 ```
 
 Requires Herdr 0.7.0+, yolo-jail, Podman (as configured for yolo-jail),
-`jq`, and `python3`. The scripts treat both JSON tools as required dependencies
+`jq`, and Python 3.9+. The scripts treat both JSON tools as required dependencies
 and fail clearly rather than skipping validation when either is unavailable.
 
 ## Actions
@@ -140,6 +140,40 @@ uses the overlay picker fallback.
   changes. Restart or normally reattach to the jail when those inputs change.
   **TODO:** switch to an immutable-ID-aware yolo-jail attach operation when one
   is available.
+
+### Pending hardening
+
+The following review findings are known and intentionally tracked rather than
+silently treated as guarantees:
+
+- **Open completion is currently submission-based.** `herdr pane run` confirms
+  that Herdr accepted the command, not that the inner `podman exec`, bootstrap,
+  shell, or agent remained running. An inner startup failure can therefore be
+  logged as a successful Open. **TODO:** emit and await per-pane readiness
+  markers, then use agent detection where applicable.
+- **Interrupted Open operations can leave partial tabs.** Explicit failures use
+  cleanup paths, but interruption or an unexpected shell exit after tab
+  creation can leave an empty or half-initialized tab. **TODO:** add guarded
+  `EXIT`, `INT`, and `TERM` cleanup that is disarmed only after verified startup.
+- **Attribution input validation needs tightening.** Jail mappings should reject
+  malformed TSV, control characters, duplicate mappings, and non-normalized or
+  non-absolute host paths. Snapshot parsing should fail explicitly when
+  `result.snapshot.panes` is missing or has the wrong type instead of treating
+  it as an empty snapshot. **TODO:** enforce these schemas and add adversarial
+  fixtures.
+- **Workspace attribution is not atomic with Open.** Attribution is checked
+  before panes are created and container identity is checked again before
+  dispatch, but the workspace's panes can move in between. The immutable ID
+  still prevents targeting a same-name replacement. **TODO:** repeat attribution
+  immediately before dispatch to narrow the logical race.
+- **Overlay refresh errors look like an empty result.** The fallback picker loses
+  the status of its refresh subprocess and can display “No running jails” after
+  a Podman, snapshot, or attribution failure. **TODO:** preserve the previous
+  list and display an explicit refresh error.
+- **Native choices expose at most 32 jails.** Herdr permits 64 choices and each
+  jail consumes an Open and Close row. This is an intentional bounded-provider
+  limit; use the fallback picker if a workspace exceeds it. Pagination can be
+  added if this becomes a practical constraint.
 
 ## Known limitations
 
