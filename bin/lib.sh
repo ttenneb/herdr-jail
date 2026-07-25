@@ -8,7 +8,17 @@ set -euo pipefail
 # Prepend common bin dirs so `command -v` can find Homebrew/Nix tools.
 export PATH="/opt/homebrew/bin:/usr/local/bin:/nix/var/nix/profiles/default/bin:/usr/bin:/bin:${PATH:-}"
 
-HERDR="${HERDR_BIN_PATH:-herdr}"
+# Herdr may atomically replace its executable while a session remains live.
+# On Linux, current_exe() then ends in " (deleted)"; fall back to PATH rather
+# than making every plugin API call fail until the session is restarted.
+HERDR="${HERDR_BIN_PATH:-}"
+if [ -z "$HERDR" ] || [ ! -x "$HERDR" ]; then
+  HERDR="$(command -v herdr 2>/dev/null || true)"
+fi
+[ -n "$HERDR" ] && [ -x "$HERDR" ] || {
+  printf '[herdr-jail] herdr executable not found\n' >&2
+  return 1 2>/dev/null || exit 1
+}
 
 # Agents that yolo-jail supports (should be jailed). Keep in sync with
 # yolo-jail's `agents` config valid values.

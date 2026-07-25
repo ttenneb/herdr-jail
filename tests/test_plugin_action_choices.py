@@ -78,6 +78,25 @@ class ChoiceCodecTests(unittest.TestCase):
         ).stdout)
         self.assertEqual(emitted["choices"], [])
 
+    def test_invalid_herdr_bin_falls_back_to_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "herdr"
+            fake.write_text("#!/bin/sh\nprintf fallback-ok\n")
+            fake.chmod(0o755)
+            run = subprocess.run(
+                ["/bin/bash", "-c", '. bin/lib.sh; "$HERDR"'],
+                cwd=ROOT,
+                env={
+                    "HOME": str(Path(tmp) / "home"),
+                    "PATH": tmp,
+                    "HERDR_BIN_PATH": str(Path(tmp) / "herdr (deleted)"),
+                },
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(run.stdout, "fallback-ok")
+
     def test_shell_quote_preserves_hostile_path_as_one_literal(self):
         hostile = "/tmp/a path/'quote;$(touch /tmp/herdr-jail-injected)"
         marker = Path("/tmp/herdr-jail-injected")
