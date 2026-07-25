@@ -127,6 +127,20 @@ action choices support. The manifest remains at `min_herdr_version = "0.7.0"`:
 older Herdr invokes the normal action without a native choice and therefore
 uses the overlay picker fallback.
 
+## Gotchas
+
+- **Opening a running jail favors exact identity over lifecycle refresh.** The
+  Open action uses `podman exec` with the selected full container ID so a
+  same-name replacement cannot be targeted accidentally. This retains the
+  existing container sandbox, but bypasses the normal host-side `yolo` attach
+  maintenance and in-container `yolo-entrypoint` regeneration. The plugin
+  restores the user environment, Mise environment, and yolo shim path, but a
+  long-running jail can retain stale generated shims, agent/MCP configuration,
+  CA setup, briefings, or broker-relay state after related configuration
+  changes. Restart or normally reattach to the jail when those inputs change.
+  **TODO:** switch to an immutable-ID-aware yolo-jail attach operation when one
+  is available.
+
 ## Known limitations
 
 - **`migrate` is recovery, not prevention.** The migrate action stops a

@@ -124,8 +124,11 @@ PY
     q_agent_dir="$(shell_quote "$container_workdir")"; q_kind="$(shell_quote "$kind")"
     q_shell_dir="$(shell_quote "/workspace")"
 
-    # `podman exec` does not run yolo-entrypoint, so reproduce its trusted
-    # environment setup before resolving an agent or opening a shell. Quote the
+    # TODO: Use an immutable-ID-aware yolo-jail attach operation when one is
+    # available. Direct `podman exec` preserves exact container targeting but
+    # bypasses yolo's host-side refresh and yolo-entrypoint regeneration. The
+    # bootstrap below restores the environment needed for current sessions; it
+    # is not a complete replacement for the normal attach lifecycle. Quote the
     # complete inner program as one host-shell word: pane run accepts a command
     # string, and neither container paths nor the program may be re-expanded by
     # the host shell.
