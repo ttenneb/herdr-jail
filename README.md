@@ -35,7 +35,9 @@ herdr plugin list        # should show hs.jail
 # command = "hs.jail.open-tree"
 ```
 
-Requires Herdr 0.7.0+, yolo-jail, and Podman (as configured for yolo-jail).
+Requires Herdr 0.7.0+, yolo-jail, Podman (as configured for yolo-jail),
+`jq`, and `python3`. The scripts treat both JSON tools as required dependencies
+and fail clearly rather than skipping validation when either is unavailable.
 
 ## Actions
 
@@ -44,6 +46,7 @@ Requires Herdr 0.7.0+, yolo-jail, and Podman (as configured for yolo-jail).
 | Run agent in jail | `hs.jail.run` | Launch a supported agent jailed; reuse a parent jail if present (feature #1 + #2). |
 | Open Jail Tree | `hs.jail.open-tree` | Open the jail-tree pane (feature #3). |
 | Migrate agent into jail | `hs.jail.migrate` | Stop an un-jailed agent in the pane and relaunch it jailed, resuming where possible (manual recovery). |
+| Jails… | `hs.jail.jails` | Choose a live jail attributed to the workspace, then open or close it. |
 
 Set the agent with `HERDR_JAIL_AGENT` (default `claude`). Supported:
 `claude pi codex gemini opencode copilot`.
@@ -108,6 +111,22 @@ explicitly (see `bin/lib.sh`) and drive Herdr via the `herdr` CLI. Jails are
 discovered by querying `podman` for containers named `yolo-*` and reading each
 one's `YOLO_HOST_DIR` env label — that maps a jail to its workspace directory.
 
+The **Jails…** action uses Herdr's plugin action choices protocol. Its
+`choices_command` emits one strict version-1 JSON document; Herdr passes the
+selected `{id,label,payload}` object back in
+`HERDR_PLUGIN_ACTION_CHOICE_JSON`, not argv. Before acting, the plugin queries
+Podman and a fresh Herdr snapshot again and requires the same immutable
+container ID to still be attributed to the captured workspace. Stale,
+same-name replacement, or malformed choices fail closed. Open uses
+`podman exec` with that full immutable ID for both the agent and shell panes;
+a repository beneath the jail root is mapped under `/workspace`, while an
+unrelated repository path is rejected.
+
+Native context-menu choices require the downstream/unreleased Herdr plugin
+action choices support. The manifest remains at `min_herdr_version = "0.7.0"`:
+older Herdr invokes the normal action without a native choice and therefore
+uses the overlay picker fallback.
+
 ## Known limitations
 
 - **`migrate` is recovery, not prevention.** The migrate action stops a
@@ -140,4 +159,9 @@ bin/enforce.sh      event handler: flag un-jailed agents
 bin/jail-tree.sh    pane: gather data, render loop
 bin/group.py        jail→workspace grouping (deepest-ancestor attribution)
 bin/open-tree.sh    action: open the jail-tree pane
+bin/jail-menu-provider.sh  native action choices provider
+bin/jail-menu.sh    selected-choice validation/invocation + overlay fallback
+bin/jail-menu-ui.sh overlay picker fallback
+bin/jail-choice.py  strict choice JSON encoder/decoder
+bin/jail-ops.sh     validated open/close operations
 ```
