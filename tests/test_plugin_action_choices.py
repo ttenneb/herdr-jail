@@ -16,12 +16,18 @@ SNAPSHOT = ROOT / "tests" / "fixtures" / "snapshot-attached.json"
 CONTAINER_ID = "a" * 64
 
 
-def choice(operation="close", container="yolo-project-abc", container_id=CONTAINER_ID):
+def choice_label(operation, container):
+    name = container.removeprefix("yolo-")
+    if len(name) > 32:
+        name = f"{name[:23]}…{name[-8:]}"
     verb = "Open" if operation == "open" else "Close"
-    short = container.removeprefix("yolo-")[:3]
+    return f"{verb} {name}"
+
+
+def choice(operation="close", container="yolo-project-abc", container_id=CONTAINER_ID):
     return json.dumps({
         "id": f"{operation}:{container_id}",
-        "label": f"{verb} Jail {short}...",
+        "label": choice_label(operation, container),
         "payload": {"operation": operation, "container": {"name": container, "id": container_id}},
     })
 
@@ -42,6 +48,18 @@ class ChoiceCodecTests(unittest.TestCase):
         self.assertEqual(doc["choices"][0]["payload"]["container"], {
             "name": "yolo-project-abc", "id": CONTAINER_ID
         })
+        self.assertEqual([item["label"] for item in doc["choices"]], [
+            "Open project-abc", "Close project-abc"
+        ])
+
+    def test_labels_cap_display_name_and_preserve_identity_suffix(self):
+        name = "yolo-" + ("a" * 40) + "-deadbeef"
+        run = run_codec("emit", f"{name}\t/tmp/project\tpi\t{CONTAINER_ID}\n")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        labels = [item["label"] for item in json.loads(run.stdout)["choices"]]
+        shown = ("a" * 23) + "…deadbeef"
+        self.assertEqual(labels, [f"Open {shown}", f"Close {shown}"])
+        self.assertEqual(len(shown), 32)
 
     def test_emit_is_bytewise_sorted_and_capped_before_65(self):
         rows = [

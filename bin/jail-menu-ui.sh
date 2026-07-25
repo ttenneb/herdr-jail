@@ -2,8 +2,8 @@
 # jail-menu-ui.sh — interactive picker pane listing a workspace's jails.
 #
 # Runs as a plugin-owned overlay pane (opened by jail-menu.sh). Renders one
-# entry per jail with Open/Close actions whose labels show the jail's first 3
-# chars ("Open Jail XXX..."). Keyboard-driven; dispatches to jail-ops.sh.
+# entry per jail with concise Open/Close labels. Keyboard-driven; dispatches
+# to jail-ops.sh.
 here="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=lib.sh
 . "$here/lib.sh"
@@ -14,6 +14,15 @@ require_json_dependencies || { log "overlay jail menu requires jq and python3"; 
 [ -n "$WID" ] || { log "overlay jail menu has no workspace"; exit 1; }
 
 C_T=$'\033[1m'; C_D=$'\033[2m'; C_A=$'\033[1;36m'; C_R=$'\033[0m'; C_W=$'\033[1;33m'
+
+display_name() {
+  local name="${1#yolo-}"
+  if [ "${#name}" -le 32 ]; then
+    printf '%s' "$name"
+  else
+    printf '%s…%s' "${name:0:23}" "${name: -8}"
+  fi
+}
 
 # Gather this workspace's jails: TSV lines "<container>\t<host_dir>\t<kind>"
 gather() {
@@ -36,13 +45,13 @@ draw() {
     printf '  %s[r]%s refresh   %s[q]%s close\n' "$C_A" "$C_R" "$C_A" "$C_R"
     return
   fi
-  local i=1 line container dir kind short xxx
+  local i=1 line container dir kind short shown
   for line in "${JAILS[@]}"; do
     IFS=$'\t' read -r container dir kind <<<"$line"
     short="${container#yolo-}"
-    xxx="$(printf '%s' "$short" | cut -c1-3)"
+    shown="$(display_name "$container")"
     printf '  %s%d.%s %s  %s(%s, agent: %s)%s\n' "$C_T" "$i" "$C_R" "$short" "$C_D" "$dir" "$kind" "$C_R"
-    printf '       %s[o%d]%s Open Jail %s...    %s[c%d]%s Close Jail %s...\n\n' "$C_A" "$i" "$C_R" "$xxx" "$C_W" "$i" "$C_R" "$xxx"
+    printf '       %s[o%d]%s Open %s    %s[c%d]%s Close %s\n\n' "$C_A" "$i" "$C_R" "$shown" "$C_W" "$i" "$C_R" "$shown"
     i=$((i + 1))
   done
   printf '  %s[r]%s refresh   %s[q]%s close\n' "$C_A" "$C_R" "$C_A" "$C_R"

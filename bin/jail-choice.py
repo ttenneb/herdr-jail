@@ -9,6 +9,8 @@ import sys
 CONTAINER_NAME_RE = re.compile(r"yolo-[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 CONTAINER_ID_RE = re.compile(r"[0-9a-f]{64}\Z")
 OPERATIONS = {"open", "close"}
+DISPLAY_NAME_LIMIT = 32
+DISPLAY_NAME_SUFFIX = 8
 
 
 def valid_container_name(value):
@@ -19,10 +21,17 @@ def valid_container_id(value):
     return isinstance(value, str) and CONTAINER_ID_RE.fullmatch(value) is not None
 
 
+def display_name(container_name):
+    name = container_name.removeprefix("yolo-")
+    if len(name) <= DISPLAY_NAME_LIMIT:
+        return name
+    prefix_length = DISPLAY_NAME_LIMIT - DISPLAY_NAME_SUFFIX - 1
+    return f"{name[:prefix_length]}…{name[-DISPLAY_NAME_SUFFIX:]}"
+
+
 def label(operation, container_name):
-    short = container_name.removeprefix("yolo-")[:3]
     verb = "Open" if operation == "open" else "Close"
-    return f"{verb} Jail {short}..."
+    return f"{verb} {display_name(container_name)}"
 
 
 def emit():
