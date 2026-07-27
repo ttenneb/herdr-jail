@@ -35,7 +35,9 @@ herdr plugin list        # should show hs.jail
 # command = "hs.jail.open-tree"
 ```
 
-Requires Herdr 0.7.0+, yolo-jail, and Podman (as configured for yolo-jail).
+Requires Herdr 0.7.0+, yolo-jail, Podman (as configured for yolo-jail),
+`jq`, and Python 3.9+. The scripts treat both JSON tools as required dependencies
+and fail clearly rather than skipping validation when either is unavailable.
 
 ## Actions
 
@@ -44,6 +46,7 @@ Requires Herdr 0.7.0+, yolo-jail, and Podman (as configured for yolo-jail).
 | Run agent in jail | `hs.jail.run` | Launch a supported agent jailed; reuse a parent jail if present (feature #1 + #2). |
 | Open Jail Tree | `hs.jail.open-tree` | Open the jail-tree pane (feature #3). |
 | Migrate agent into jail | `hs.jail.migrate` | Stop an un-jailed agent in the pane and relaunch it jailed, resuming where possible (manual recovery). |
+| Jails… | `hs.jail.jails` | Choose a live jail attributed to the workspace, then open or close it. |
 
 Set the agent with `HERDR_JAIL_AGENT` (default `claude`). Supported:
 `claude pi codex gemini opencode copilot`.
@@ -108,6 +111,70 @@ explicitly (see `bin/lib.sh`) and drive Herdr via the `herdr` CLI. Jails are
 discovered by querying `podman` for containers named `yolo-*` and reading each
 one's `YOLO_HOST_DIR` env label — that maps a jail to its workspace directory.
 
+The **Jails…** action uses Herdr's plugin action choices protocol. Its
+`choices_command` emits one strict version-1 JSON document; Herdr passes the
+selected `{id,label,payload}` object back in
+`HERDR_PLUGIN_ACTION_CHOICE_JSON`, not argv. Before acting, the plugin queries
+Podman and a fresh Herdr snapshot again and requires the same immutable
+container ID to still be attributed to the captured workspace. Stale,
+same-name replacement, or malformed choices fail closed. Open uses
+`podman exec` with that full immutable ID for both the agent and shell panes;
+a repository beneath the jail root is mapped under `/workspace`, while an
+unrelated repository path is rejected.
+
+Native context-menu choices require the downstream/unreleased Herdr plugin
+action choices support. The manifest remains at `min_herdr_version = "0.7.0"`:
+older Herdr invokes the normal action without a native choice and therefore
+uses the overlay picker fallback.
+
+## Gotchas
+
+- **Opening a running jail favors exact identity over lifecycle refresh.** The
+  Open action uses `podman exec` with the selected full container ID so a
+  same-name replacement cannot be targeted accidentally. This retains the
+  existing container sandbox, but bypasses the normal host-side `yolo` attach
+  maintenance and in-container `yolo-entrypoint` regeneration. The plugin
+  restores the user environment, Mise environment, and yolo shim path, but a
+  long-running jail can retain stale generated shims, agent/MCP configuration,
+  CA setup, briefings, or broker-relay state after related configuration
+  changes. Restart or normally reattach to the jail when those inputs change.
+  **TODO:** switch to an immutable-ID-aware yolo-jail attach operation when one
+  is available.
+
+### Pending hardening
+
+The following review findings are known and intentionally tracked rather than
+silently treated as guarantees:
+
+- **Open completion is currently submission-based.** `herdr pane run` confirms
+  that Herdr accepted the command, not that the inner `podman exec`, bootstrap,
+  shell, or agent remained running. An inner startup failure can therefore be
+  logged as a successful Open. **TODO:** emit and await per-pane readiness
+  markers, then use agent detection where applicable.
+- **Interrupted Open operations can leave partial tabs.** Explicit failures use
+  cleanup paths, but interruption or an unexpected shell exit after tab
+  creation can leave an empty or half-initialized tab. **TODO:** add guarded
+  `EXIT`, `INT`, and `TERM` cleanup that is disarmed only after verified startup.
+- **Attribution input validation needs tightening.** Jail mappings should reject
+  malformed TSV, control characters, duplicate mappings, and non-normalized or
+  non-absolute host paths. Snapshot parsing should fail explicitly when
+  `result.snapshot.panes` is missing or has the wrong type instead of treating
+  it as an empty snapshot. **TODO:** enforce these schemas and add adversarial
+  fixtures.
+- **Workspace attribution is not atomic with Open.** Attribution is checked
+  before panes are created and container identity is checked again before
+  dispatch, but the workspace's panes can move in between. The immutable ID
+  still prevents targeting a same-name replacement. **TODO:** repeat attribution
+  immediately before dispatch to narrow the logical race.
+- **Overlay refresh errors look like an empty result.** The fallback picker loses
+  the status of its refresh subprocess and can display “No running jails” after
+  a Podman, snapshot, or attribution failure. **TODO:** preserve the previous
+  list and display an explicit refresh error.
+- **Native choices expose at most 32 jails.** Herdr permits 64 choices and each
+  jail consumes an Open and Close row. This is an intentional bounded-provider
+  limit; use the fallback picker if a workspace exceeds it. Pagination can be
+  added if this becomes a practical constraint.
+
 ## Known limitations
 
 - **`migrate` is recovery, not prevention.** The migrate action stops a
@@ -140,4 +207,9 @@ bin/enforce.sh      event handler: flag un-jailed agents
 bin/jail-tree.sh    pane: gather data, render loop
 bin/group.py        jail→workspace grouping (deepest-ancestor attribution)
 bin/open-tree.sh    action: open the jail-tree pane
+bin/jail-menu-provider.sh  native action choices provider
+bin/jail-menu.sh    selected-choice validation/invocation + overlay fallback
+bin/jail-menu-ui.sh overlay picker fallback
+bin/jail-choice.py  strict choice JSON encoder/decoder
+bin/jail-ops.sh     validated open/close operations
 ```
