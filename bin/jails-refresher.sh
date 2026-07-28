@@ -1,76 +1,55 @@
 #!/bin/bash
-# jails-refresher.sh — keep sidebar tokens current per workspace.
-#
-# Sets custom tokens rendered via [ui.sidebar.spaces]:
-#   $giticon — Nerd Font branch glyph, ONLY on workspaces whose dir is a git
-#              work tree (so it doesn't float on non-git workspaces)
-#   $jails   — Nerd Font lock + dir-keyed jail id when the workspace has a jail
-#
-# Nerd Font glyphs (need a Nerd Font in the terminal):
-#   GIT_ICON  = U+E0A0 (pl-branch)   LOCK_ICON = U+F023 (fa-lock)
+# Report the complete jail resource projection for every Checkout.
 here="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=lib.sh
 . "$here/lib.sh"
 
 INTERVAL="${HERDR_JAIL_REFRESH_INTERVAL:-4}"
 TTL_MS=$(( (INTERVAL * 3) * 1000 ))
-MAX_JAIL_ROWS="${HERDR_JAIL_MAX_ROWS:-5}"
-# Nerd Font glyphs built from explicit codepoints (raw bytes don't survive
-# some editors/heredocs). U+E0A0 = pl-branch, U+F023 = fa-lock.
-GIT_ICON="${HERDR_JAIL_GIT_ICON:-$(printf '\xee\x82\xa0')}"   # U+E0A0 pl-branch
-LOCK_ICON="${HERDR_JAIL_LOCK_ICON:-$(printf '\xef\x80\xa3')}"  # U+F023 fa-lock
-
-# Single-instance guard: if another refresher is already running, exit quietly.
-# Herdr's [[startup]] and manual launches could otherwise both run and fight.
-LOCK_DIR="${TMPDIR:-/tmp}/herdr-jail-refresher.lock"
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  # Stale lock? Check for a live pid.
-  if [ -r "$LOCK_DIR/pid" ] && kill -0 "$(cat "$LOCK_DIR/pid" 2>/dev/null)" 2>/dev/null; then
-    log "another refresher is already running; exiting"
-    exit 0
-  fi
-  # stale — take it over
-  rm -rf "$LOCK_DIR" 2>/dev/null; mkdir "$LOCK_DIR" 2>/dev/null || exit 0
+# Python fcntl.flock is available on both supported platforms. The helper
+# opens a no-follow UID-owned regular file, takes a nonblocking advisory lock,
+# and execs this process with its FD inheritable; kernel exit releases it.
+if [ "${HERDR_JAIL_REFRESH_LOCKED:-}" != "1" ]; then
+  lock_root="$(python3 "$here/refresher-runtime-dir.py")" || exit 1
+  socket_key="${HERDR_SOCKET_PATH:-${HERDR_SESSION_ID:-default}}"
+  lock_hash="$(printf '%s' "$socket_key" | cksum | awk '{print $1}')"
+  exec python3 "$here/refresher-lock.py" --lock "$lock_root/refresher-${lock_hash}.lock" -- \
+    bash "$0" "$@"
 fi
-echo "$$" > "$LOCK_DIR/pid"
-trap 'rm -rf "$LOCK_DIR"' EXIT INT TERM
+trap 'exit 0' INT TERM
 
-log "jails-refresher started (interval ${INTERVAL}s)"
+report_once() {
+  local jf wf snap graph line wid resources
+  jf="$(mktemp)"; wf="$(mktemp)"; snap="$(mktemp)"; graph="$(mktemp)"
+  # Do not clear/report anything on discovery failure: an unavailable Podman or
+  # Herdr API is unknown state, not zero jails.
+  if ! list_jails >"$jf" || ! "$HERDR" workspace list >"$wf" || ! "$HERDR" api snapshot >"$snap" \
+      || ! python3 "$here/resource-graph.py" --jails "$jf" --workspaces "$wf" --snapshot "$snap" >"$graph"; then
+    log "resource refresh failed; retaining the last reported resources"
+    rm -f "$jf" "$wf" "$snap" "$graph"
+    return 1
+  fi
+  while IFS= read -r line; do
+    wid="$(printf '%s' "$line" | jq -er '.workspace_id' 2>/dev/null)" || { rm -f "$jf" "$wf" "$snap" "$graph"; return 1; }
+    resources="$(printf '%s' "$line" | jq -ec '.resources' 2>/dev/null)" || { rm -f "$jf" "$wf" "$snap" "$graph"; return 1; }
+    # The resource report is replacement-style: [] explicitly clears a Checkout
+    # that lost its final jail.  --file avoids shell JSON quoting.
+    resource_file="$(mktemp)"; printf '%s\n' "$resources" > "$resource_file"
+    "$HERDR" workspace report-resources "$wid" --plugin hs.jail --file "$resource_file" --ttl-ms "$TTL_MS" >/dev/null || {
+      rm -f "$resource_file" "$jf" "$wf" "$snap" "$graph"; return 1;
+    }
+    rm -f "$resource_file"
+    # Upgrade cleanup for former custom sidebar presentation. These clears are
+    # intentionally separate from resources and harmless if already absent.
+    "$HERDR" workspace report-metadata "$wid" --source hs.jail --clear-token giticon >/dev/null 2>&1 || true
+    for token in jails jail1 jail2 jail3 jail4 jail5; do
+      "$HERDR" workspace report-metadata "$wid" --source hs.jail --clear-token "$token" >/dev/null 2>&1 || true
+    done
+  done < <(jq -c '.workspaces[]' "$graph")
+  rm -f "$jf" "$wf" "$snap" "$graph"
+}
+
+log "jails resource refresher started (interval ${INTERVAL}s)"
 while true; do
-  jf="$(mktemp)"; wf="$(mktemp)"; pf="$(mktemp)"
-  list_jails > "$jf" 2>/dev/null || true
-  "$HERDR" workspace list > "$wf" 2>/dev/null || echo '{}' > "$wf"
-  "$HERDR" pane list > "$pf" 2>/dev/null || echo '{}' > "$pf"
-
-  while IFS=$'\t' read -r wid has_git label; do
-    [ -z "$wid" ] && continue
-    # git icon only where a branch actually renders (workspace dir is a git tree)
-    if [ "$has_git" = "1" ]; then
-      "$HERDR" workspace report-metadata "$wid" --source hs.jail \
-        --token giticon="$GIT_ICON" --ttl-ms "$TTL_MS" >/dev/null 2>&1 || true
-    else
-      "$HERDR" workspace report-metadata "$wid" --source hs.jail \
-        --clear-token giticon >/dev/null 2>&1 || true
-    fi
-    # one token per jail: jail1, jail2, ... (each renders on its own row).
-    # label is "|"-separated jail ids. Set present slots, clear the rest.
-    _i=1
-    _old_ifs="$IFS"; IFS='"'"'|'"'"'
-    for _jid in $label; do
-      [ -z "$_jid" ] && continue
-      "$HERDR" workspace report-metadata "$wid" --source hs.jail \
-        --token "jail${_i}=${LOCK_ICON} ${_jid}" --ttl-ms "$TTL_MS" >/dev/null 2>&1 || true
-      _i=$((_i + 1))
-    done
-    IFS="$_old_ifs"
-    # clear unused slots up to MAX_JAIL_ROWS
-    while [ "$_i" -le "$MAX_JAIL_ROWS" ]; do
-      "$HERDR" workspace report-metadata "$wid" --source hs.jail \
-        --clear-token "jail${_i}" >/dev/null 2>&1 || true
-      _i=$((_i + 1))
-    done
-  done < <(python3 "$here/jails-status.py" --jails "$jf" --workspaces "$wf" --panes "$pf" 2>/dev/null)
-
-  rm -f "$jf" "$wf" "$pf"
+  report_once || true
   sleep "$INTERVAL"
 done

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,8 @@ OPS = ROOT / "bin" / "jail-ops.sh"
 PROVIDER = ROOT / "bin" / "jail-menu-provider.sh"
 SNAPSHOT = ROOT / "tests" / "fixtures" / "snapshot-attached.json"
 CONTAINER_ID = "a" * 64
+ATTACHMENTS = ["ws-1"]
+FINGERPRINT = hashlib.sha256(json.dumps(ATTACHMENTS, separators=(",", ":")).encode()).hexdigest()
 
 
 def choice_label(operation, container):
@@ -28,7 +31,7 @@ def choice(operation="close", container="yolo-project-abc", container_id=CONTAIN
     return json.dumps({
         "id": f"{operation}:{container_id}",
         "label": choice_label(operation, container),
-        "payload": {"operation": operation, "container": {"name": container, "id": container_id}},
+        "payload": {"operation": operation, "container": {"name": container, "id": container_id, "attachments": ATTACHMENTS, "attachment_fingerprint": FINGERPRINT}},
     })
 
 
@@ -38,7 +41,7 @@ def run_codec(mode, value):
 
 class ChoiceCodecTests(unittest.TestCase):
     def test_emit_is_strict_version_one_json(self):
-        run = run_codec("emit", f"yolo-project-abc\t/tmp/project\tpi\t{CONTAINER_ID}\n")
+        run = run_codec("emit", f"yolo-project-abc\t/tmp/project\tpi\t{CONTAINER_ID}\tws-1\t{FINGERPRINT}\n")
         self.assertEqual(run.returncode, 0, run.stderr)
         doc = json.loads(run.stdout)
         self.assertEqual(doc["version"], 1)
@@ -46,7 +49,7 @@ class ChoiceCodecTests(unittest.TestCase):
             f"open:{CONTAINER_ID}", f"close:{CONTAINER_ID}"
         ])
         self.assertEqual(doc["choices"][0]["payload"]["container"], {
-            "name": "yolo-project-abc", "id": CONTAINER_ID
+            "name": "yolo-project-abc", "id": CONTAINER_ID, "attachments": ATTACHMENTS, "attachment_fingerprint": FINGERPRINT
         })
         self.assertEqual([item["label"] for item in doc["choices"]], [
             "Open project-abc", "Close project-abc"
@@ -54,7 +57,7 @@ class ChoiceCodecTests(unittest.TestCase):
 
     def test_labels_cap_display_name_and_preserve_identity_suffix(self):
         name = "yolo-" + ("a" * 40) + "-deadbeef"
-        run = run_codec("emit", f"{name}\t/tmp/project\tpi\t{CONTAINER_ID}\n")
+        run = run_codec("emit", f"{name}\t/tmp/project\tpi\t{CONTAINER_ID}\tws-1\t{FINGERPRINT}\n")
         self.assertEqual(run.returncode, 0, run.stderr)
         labels = [item["label"] for item in json.loads(run.stdout)["choices"]]
         shown = ("a" * 23) + "…deadbeef"
@@ -63,7 +66,7 @@ class ChoiceCodecTests(unittest.TestCase):
 
     def test_emit_is_bytewise_sorted_and_capped_before_65(self):
         rows = [
-            f"yolo-jail-{i:02d}\t/tmp/{i:02d}\tpi\t{i + 1:064x}"
+            f"yolo-jail-{i:02d}\t/tmp/{i:02d}\tpi\t{i + 1:064x}\tws-1\t{FINGERPRINT}"
             for i in range(40)
         ]
         forward = run_codec("emit", "\n".join(rows) + "\n")
@@ -92,7 +95,7 @@ class ChoiceCodecTests(unittest.TestCase):
         short_id = "a" * 63
         self.assertNotEqual(run_codec("parse", choice(container_id=short_id)).returncode, 0)
         emitted = json.loads(run_codec(
-            "emit", f"yolo-project-abc\t/tmp/project\tpi\t{short_id}\n"
+            "emit", f"yolo-project-abc\t/tmp/project\tpi\t{short_id}\tws-1\t{FINGERPRINT}\n"
         ).stdout)
         self.assertEqual(emitted["choices"], [])
 
@@ -215,6 +218,7 @@ printf '%s' "$1" >> "$FAKE_HERDR_LOG"
 for arg in "${@:2}"; do printf '\\t%s' "$arg" >> "$FAKE_HERDR_LOG"; done
 printf '\\n' >> "$FAKE_HERDR_LOG"
 case "$1 $2" in
+  "workspace list") printf '%s\\n' '{"result":{"workspaces":[{"workspace_id":"ws-1"}]}}' ;;
   "api snapshot") cat "$FAKE_SNAPSHOT" ;;
   "notification show") exit 0 ;;
   "tab create")
@@ -467,6 +471,25 @@ esac
             self.assertNotEqual(
                 subprocess.run(["bash", str(MENU)], env=env, capture_output=True).returncode, 0
             )
+
+    def test_resource_context_is_exact_and_changed_attachment_fails_closed(self):
+        context = {
+            "workspace_id": "ws-1", "workspace_cwd": "/tmp/project",
+            "workspace_resource": {"plugin_id": "hs.jail", "resource_id": CONTAINER_ID,
+                "data": {"container_id": CONTAINER_ID, "attachments": ATTACHMENTS, "attachment_fingerprint": FINGERPRINT}},
+        }
+        env = self.env(); env["HERDR_PLUGIN_CONTEXT_JSON"] = json.dumps(context)
+        provider = subprocess.run(["bash", str(PROVIDER)], env=env, text=True, capture_output=True)
+        self.assertEqual(provider.returncode, 0, provider.stderr)
+        self.assertEqual([x["id"] for x in json.loads(provider.stdout)["choices"]], [f"open:{CONTAINER_ID}", f"close:{CONTAINER_ID}"])
+        # The menu's old Close is rejected after fresh attribution loses its
+        # only Checkout projection; no container-wide stop is dispatched.
+        self.snapshot.write_text(json.dumps({"result": {"snapshot": {"panes": [
+            {"workspace_id": "ws-1", "foreground_cwd": "/tmp/unattached"}]}}}))
+        env["HERDR_PLUGIN_ACTION_CHOICE_JSON"] = choice()
+        action = subprocess.run(["bash", str(MENU)], env=env, text=True, capture_output=True)
+        self.assertNotEqual(action.returncode, 0)
+        self.assertFalse(self.stop_log.exists())
 
     def test_jail_ops_rejects_unsupported_agent_and_short_id(self):
         for agent, identity in (("not-an-agent", CONTAINER_ID), ("pi", "a" * 63)):

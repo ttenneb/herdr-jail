@@ -1,115 +1,39 @@
 #!/bin/bash
-# jail-menu.sh — workspace jail action.
-#
-# New Herdr versions invoke this normal action with a selected choice in
-# HERDR_PLUGIN_ACTION_CHOICE_JSON. Direct invocation (or an older Herdr without
-# action choices) preserves the plugin-owned overlay picker fallback.
-here="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=lib.sh
-. "$here/lib.sh"
-
-notify_failure() {
-  "$HERDR" notification show "Jail action failed" --body "$1" --position top-right >/dev/null 2>&1 || true
-}
-
-if ! require_json_dependencies; then
-  log "jail menu requires jq and python3"
-  notify_failure "The jail plugin requires jq and python3."
-  exit 1
+# Workspace and Workspace Resource jail action; all selected choices revalidate.
+here="$(cd "$(dirname "$0")" && pwd)"; . "$here/lib.sh"
+notify_failure() { "$HERDR" notification show "Jail action failed" --body "$1" --position top-right >/dev/null 2>&1 || true; }
+require_json_dependencies && load_plugin_context || { notify_failure "The captured plugin context is malformed."; exit 1; }
+WID="${HERDR_WORKSPACE_ID:-$PLUGIN_CONTEXT_WORKSPACE_ID}"; REPO_DIR="$PLUGIN_CONTEXT_REPO_DIR"
+[ -n "$WID" ] || { notify_failure "Could not determine the Checkout."; exit 1; }
+[ -z "$PLUGIN_CONTEXT_WORKSPACE_ID" ] || [ -z "${HERDR_WORKSPACE_ID:-}" ] || [ "$WID" = "$PLUGIN_CONTEXT_WORKSPACE_ID" ] || exit 1
+if [ -z "${HERDR_PLUGIN_ACTION_CHOICE_JSON:-}" ]; then
+  args=(plugin pane open --plugin hs.jail --entrypoint jail-menu --placement overlay --focus --env "HERDR_JAIL_WS=$WID")
+  [ -z "$REPO_DIR" ] || args+=(--env "HERDR_JAIL_REPO_DIR=$REPO_DIR")
+  "$HERDR" "${args[@]}"; exit $?
 fi
-if ! load_plugin_context; then
-  log "malformed plugin invocation context"
-  notify_failure "The captured workspace context is malformed."
-  exit 1
+parsed="$(printf '%s' "$HERDR_PLUGIN_ACTION_CHOICE_JSON" | python3 "$here/jail-choice.py" parse 2>/dev/null)" || true
+IFS=$'\t' read -r op container identity attachment_csv selected_fp extra <<<"$parsed"
+[ -n "$parsed" ] && [ -z "${extra:-}" ] || { notify_failure "The selected jail choice is invalid."; exit 1; }
+jf="$(mktemp)"; wf="$(mktemp)"; snap="$(mktemp)"; rows="$(mktemp)"
+trap 'rm -f "$jf" "$wf" "$snap" "$rows"' EXIT
+list_jails >"$jf" || { log "could not query live Podman jails"; notify_failure "Could not verify live Podman jails."; exit 1; }
+"$HERDR" workspace list >"$wf" && "$HERDR" api snapshot >"$snap" || { notify_failure "Could not refresh Herdr state."; exit 1; }
+python3 "$here/resource-graph.py" --workspace "$WID" --jails "$jf" --workspaces "$wf" --snapshot "$snap" >"$rows" || { notify_failure "Could not verify jail attribution."; exit 1; }
+line="$(awk -F '\t' -v id="$identity" '$4 == id {print; found=1} END {if (!found) exit 1}' "$rows")" || { notify_failure "That jail is no longer attached to this Checkout."; exit 1; }
+IFS=$'\t' read -r live_name jail_dir kind live_id live_attachments live_fp extra <<<"$line"
+[ -z "${extra:-}" ] && [ "$live_name" = "$container" ] && [ "$live_id" = "$identity" ] && [ "$live_attachments" = "$attachment_csv" ] && [ "$live_fp" = "$selected_fp" ] || {
+  log "rejected stale/replaced jail or changed attachment graph"; notify_failure "Jail attachments changed; reopen the menu before acting."; exit 1; }
+# Resource child context must identify this immutable resource and retain the
+# exact attachment fingerprint displayed when its menu was opened.
+if printf '%s' "${HERDR_PLUGIN_CONTEXT_JSON:-}" | jq -e 'has("workspace_resource")' >/dev/null 2>&1; then
+  printf '%s' "$HERDR_PLUGIN_CONTEXT_JSON" | jq -e --arg id "$identity" --arg fp "$selected_fp" '
+    .workspace_resource as $r | $r.plugin_id == "hs.jail" and $r.resource_id == $id and
+    $r.data.container_id == $id and ($r.data.attachments|type) == "array" and
+    all($r.data.attachments[]; type == "string") and $r.data.attachment_fingerprint == $fp' >/dev/null || {
+      notify_failure "That jail resource is stale; reopen its menu."; exit 1; }
 fi
-
-WID="${HERDR_WORKSPACE_ID:-$PLUGIN_CONTEXT_WORKSPACE_ID}"
-REPO_DIR="$PLUGIN_CONTEXT_REPO_DIR"
-context_wid="$PLUGIN_CONTEXT_WORKSPACE_ID"
-if [ -n "$context_wid" ] && [ -n "${HERDR_WORKSPACE_ID:-}" ] && [ "$context_wid" != "$HERDR_WORKSPACE_ID" ]; then
-  log "plugin invocation workspace context mismatch"
-  notify_failure "The captured workspace context is inconsistent."
-  exit 1
-fi
-
-# Selected invocation: fail closed unless the choice, captured workspace, live
-# jail list, and fresh Herdr attribution all agree.
-if [ -n "${HERDR_PLUGIN_ACTION_CHOICE_JSON:-}" ]; then
-  if [ -z "$WID" ]; then
-    log "choice invocation has missing or inconsistent workspace context"
-    notify_failure "The captured workspace context is invalid."
-    exit 1
-  fi
-
-  parsed="$(printf '%s' "$HERDR_PLUGIN_ACTION_CHOICE_JSON" | python3 "$here/jail-choice.py" parse 2>/dev/null || true)"
-  if [ -z "$parsed" ]; then
-    log "rejected invalid jail action choice"
-    notify_failure "The selected jail choice is invalid."
-    exit 1
-  fi
-  IFS=$'\t' read -r op container selected_identity extra <<<"$parsed"
-  if [ -n "${extra:-}" ] || [ -z "$selected_identity" ] || { [ "$op" != "open" ] && [ "$op" != "close" ]; }; then
-    log "rejected malformed or unsupported jail operation"
-    notify_failure "The selected jail operation is unsupported."
-    exit 1
-  fi
-
-  jf="$(mktemp)"; snap="$(mktemp)"; mapping="$(mktemp)"
-  cleanup() { rm -f "$jf" "$snap" "$mapping"; }
-  trap cleanup EXIT
-  if ! list_jails >"$jf" 2>/dev/null; then
-    log "could not query live Podman jails"
-    notify_failure "Could not verify the live jail container."
-    exit 1
-  fi
-  if ! "$HERDR" api snapshot >"$snap" 2>/dev/null; then
-    log "could not refresh Herdr snapshot for jail choice"
-    notify_failure "Could not verify that the jail still belongs to this workspace."
-    exit 1
-  fi
-  if ! python3 "$here/jail-agent-for-ws.py" --workspace "$WID" --jails "$jf" --snapshot "$snap" >"$mapping" 2>/dev/null; then
-    log "could not derive fresh jail attribution"
-    notify_failure "Could not verify that the jail still belongs to this workspace."
-    exit 1
-  fi
-
-  line=""
-  while IFS= read -r candidate; do
-    IFS=$'\t' read -r jc _rest <<<"$candidate"
-    if [ "$jc" = "$container" ]; then
-      live_identity="$(container_identity "$jc" 2>/dev/null || true)"
-      [ "$live_identity" = "$selected_identity" ] || continue
-      [ -n "$line" ] && { log "duplicate live mapping for $container"; exit 1; }
-      line="$candidate"
-    fi
-  done <"$mapping"
-  if [ -z "$line" ]; then
-    log "rejected stale jail choice $op:$container for workspace $WID"
-    notify_failure "That jail is no longer attached to the captured workspace."
-    exit 1
-  fi
-
-  IFS=$'\t' read -r live_container jail_dir kind extra <<<"$line"
-  if [ -n "${extra:-}" ] || [ "$live_container" != "$container" ] || [ -z "$jail_dir" ] || ! is_supported_agent "$kind"; then
-    log "rejected invalid fresh mapping for $container"
-    notify_failure "The live jail mapping is invalid."
-    exit 1
-  fi
-
-  case "$op" in
-    open) bash "$here/jail-ops.sh" open "$WID" "$container" "$jail_dir" "$kind" "$selected_identity" "$REPO_DIR" ;;
-    close) bash "$here/jail-ops.sh" close "$container" "$selected_identity" ;;
-    *) log "unknown operation after validation: $op"; exit 2 ;;
-  esac
-  exit $?
-fi
-
-# No choice: preserve the older/direct workflow by opening the overlay picker.
-if [ -z "$WID" ]; then
-  notify_failure "Could not determine the workspace."
-  exit 1
-fi
-args=(plugin pane open --plugin hs.jail --entrypoint jail-menu --placement overlay --focus
-      --env "HERDR_JAIL_WS=$WID")
-[ -n "$REPO_DIR" ] && args+=(--env "HERDR_JAIL_REPO_DIR=$REPO_DIR")
-"$HERDR" "${args[@]}"
+case "$op" in
+  open) bash "$here/jail-ops.sh" open "$WID" "$container" "$jail_dir" "$kind" "$identity" "$REPO_DIR" ;;
+  close) bash "$here/jail-ops.sh" close "$container" "$identity" ;;
+  *) exit 1 ;;
+esac

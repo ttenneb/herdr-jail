@@ -83,12 +83,13 @@ podman_bin() {
   fi
 }
 
-# List running yolo jails as TSV: <container_name>\t<workspace_host_dir>
-# Uses the container's YOLO_HOST_DIR env label (set by yolo-jail).
+# List running yolo jails as TSV: <container_name>\t<normalized_host_dir>\t<full_container_id>.
+# Discovery is an integrity boundary: malformed paths/identities or one failed
+# inspect fail the whole query; callers must never interpret failure as empty.
 list_jails() {
   local podman
   podman="$(podman_bin)" || return 1
-  local names name hostdir inspect_env
+  local names name hostdir inspect_env identity normalized
   if ! names="$("$podman" ps --filter 'name=yolo-' --format '{{.Names}}' 2>/dev/null)"; then
     log "podman ps failed while listing jails"
     return 1
@@ -108,7 +109,23 @@ list_jails() {
       log "podman inspect returned no YOLO_HOST_DIR for $name"
       return 1
     fi
-    printf '%s\t%s\n' "$name" "$hostdir"
+    normalized="$(python3 - "$hostdir" <<'PY'
+import posixpath, sys
+value = sys.argv[1]
+if not value or any(c in value for c in "\t\r\n\0"):
+    raise SystemExit(1)
+value = posixpath.normpath(value)
+if not value.startswith("/"):
+    raise SystemExit(1)
+print(value)
+PY
+)" || { log "podman returned invalid YOLO_HOST_DIR for $name"; return 1; }
+    identity="$(container_identity "$name" 2>/dev/null)" || {
+      log "could not resolve immutable container ID for $name"
+      return 1
+    }
+    is_jail_container "$name" || { log "podman returned invalid jail name"; return 1; }
+    printf '%s\t%s\t%s\n' "$name" "$normalized" "$identity"
   done <<EOF
 $names
 EOF
