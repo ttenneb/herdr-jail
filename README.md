@@ -6,15 +6,15 @@ A [Herdr](https://herdr.dev) plugin that runs coding agents inside
 Three features:
 
 1. **Parent-jail reuse** — when you launch an agent in a pane whose directory
-   is a *subdirectory* of another pane's jail (in the same Herdr workspace),
+   is a *subdirectory* of another pane's jail (in the same Herdr Checkout),
    the plugin prompts to **join the existing parent jail** instead of spawning
    a brand-new one. (yolo-jail already reuses a jail for the *same* directory;
    this extends that to descendants.)
 2. **Enforce jailing** — a best-effort watchdog: launches go through
    `yolo -- <agent>`, and if a supported agent is detected running *outside* a
    jail, the plugin warns and marks the pane.
-3. **Jail tree** — a pane that visualizes running jails grouped under their
-   Herdr workspaces.
+3. **Jail tree** — a supplementary pane that visualizes running jails grouped
+   under their Herdr Checkouts; actionable jail children appear in Spaces.
 
 ## Install
 
@@ -35,7 +35,9 @@ herdr plugin list        # should show hs.jail
 # command = "hs.jail.open-tree"
 ```
 
-Requires Herdr 0.7.0+, yolo-jail, Podman (as configured for yolo-jail),
+Requires a Herdr build with Workspace Resource support (the planned minimum is
+0.7.6, pending release confirmation; see `INTEGRATION_NOTES.md`), yolo-jail,
+Podman (as configured for yolo-jail),
 `jq`, and Python 3.9+. The scripts treat both JSON tools as required dependencies
 and fail clearly rather than skipping validation when either is unavailable.
 
@@ -46,31 +48,22 @@ and fail clearly rather than skipping validation when either is unavailable.
 | Run agent in jail | `hs.jail.run` | Launch a supported agent jailed; reuse a parent jail if present (feature #1 + #2). |
 | Open Jail Tree | `hs.jail.open-tree` | Open the jail-tree pane (feature #3). |
 | Migrate agent into jail | `hs.jail.migrate` | Stop an un-jailed agent in the pane and relaunch it jailed, resuming where possible (manual recovery). |
-| Jails… | `hs.jail.jails` | Choose a live jail attributed to the workspace, then open or close it. |
+| Jails… | `hs.jail.jails` | Choose a live jail attributed to the Checkout, then open or close it. |
 
 Set the agent with `HERDR_JAIL_AGENT` (default `claude`). Supported:
 `claude pi codex gemini opencode copilot`.
 
-## Jail indicator in the workspaces sidebar (native)
+## Jail resources in Spaces
 
-Each workspace row can show a live jail count (🔒N) in Herdr's own sidebar —
-not a separate pane. A `[[startup]]` refresher keeps a `$jails` metadata token
-current per workspace (set on jail boot, cleared on stop).
+The refresher reports structured Workspace Resources. Herdr renders each live
+jail as a `🔒` child of every attached Checkout; a shared jail appears below
+all of its Checkouts. Right-clicking a Checkout keeps aggregate Open/Close
+choices. Right-clicking a jail child targets that exact immutable Podman
+container; Close states when it affects every attachment.
 
-Herdr renders reported tokens only if the row layout references them, so add to
-`~/.config/herdr/config.toml`:
-
-> Requires a Nerd Font in your terminal (uses  U+E0A0 branch and  U+F023 lock glyphs).
-
-```toml
-[ui.sidebar.spaces]
-rows = [["state_icon", "workspace"], ["$giticon", "branch", "git_status"], ["$jail1"], ["$jail2"], ["$jail3"], ["$jail4"], ["$jail5"]]
-```
-
-Note: Herdr's plugin API cannot add a *new expandable node type* under a
-workspace (the workspace→tab→pane tree is fixed). This puts the jail indicator
-on the workspace's own row instead — the closest the native sidebar allows.
-The standalone Jail Tree pane remains for a full grouped view.
+No `[ui.sidebar.spaces]` jail rows or `$giticon`/`$jails`/`$jail1`–`$jail5`
+tokens are needed. On each successful refresh this version clears those legacy
+tokens for known Checkouts. The standalone Jail Tree pane remains available.
 
 ## Enforce jailing (auto-jail every agent in Herdr)
 
@@ -109,23 +102,23 @@ vars (`HERDR_PANE_ID`, `HERDR_PLUGIN_CONTEXT_JSON`, `HERDR_BIN_PATH`, …) and a
 **minimal PATH**. The scripts therefore resolve `yolo`/`podman`/`jq`
 explicitly (see `bin/lib.sh`) and drive Herdr via the `herdr` CLI. Jails are
 discovered by querying `podman` for containers named `yolo-*` and reading each
-one's `YOLO_HOST_DIR` env label — that maps a jail to its workspace directory.
+one's `YOLO_HOST_DIR` env label — that maps a jail to its Checkout directory.
 
-The **Jails…** action uses Herdr's plugin action choices protocol. Its
-`choices_command` emits one strict version-1 JSON document; Herdr passes the
-selected `{id,label,payload}` object back in
-`HERDR_PLUGIN_ACTION_CHOICE_JSON`, not argv. Before acting, the plugin queries
-Podman and a fresh Herdr snapshot again and requires the same immutable
-container ID to still be attributed to the captured workspace. Stale,
-same-name replacement, or malformed choices fail closed. Open uses
+The refresher invokes `herdr workspace report-resources <checkout> --plugin
+hs.jail --file <path> --ttl-ms <n>` with one replacement resource set
+per Checkout. A report failure is never treated as an empty set. Each resource
+uses the full immutable Podman ID and a canonically sorted attachment-set
+fingerprint. The **Jails…** action uses Herdr's plugin action choices protocol;
+before acting it re-queries Podman and a fresh Herdr snapshot and requires the
+same immutable ID and attachment fingerprint. A stale/replaced container or a
+changed shared attachment set fails closed (reopen the menu). Open uses
 `podman exec` with that full immutable ID for both the agent and shell panes;
 a repository beneath the jail root is mapped under `/workspace`, while an
 unrelated repository path is rejected.
 
-Native context-menu choices require the downstream/unreleased Herdr plugin
-action choices support. The manifest remains at `min_herdr_version = "0.7.0"`:
-older Herdr invokes the normal action without a native choice and therefore
-uses the overlay picker fallback.
+This plugin requires the Herdr release that supports Workspace Resources and
+`workspace_resource` action contexts. The overlay remains only as a direct
+invocation fallback.
 
 ## Gotchas
 
@@ -155,24 +148,14 @@ silently treated as guarantees:
   cleanup paths, but interruption or an unexpected shell exit after tab
   creation can leave an empty or half-initialized tab. **TODO:** add guarded
   `EXIT`, `INT`, and `TERM` cleanup that is disarmed only after verified startup.
-- **Attribution input validation needs tightening.** Jail mappings should reject
-  malformed TSV, control characters, duplicate mappings, and non-normalized or
-  non-absolute host paths. Snapshot parsing should fail explicitly when
-  `result.snapshot.panes` is missing or has the wrong type instead of treating
-  it as an empty snapshot. **TODO:** enforce these schemas and add adversarial
-  fixtures.
-- **Workspace attribution is not atomic with Open.** Attribution is checked
+- **Checkout attribution is not atomic with Open.** Attribution is checked
   before panes are created and container identity is checked again before
-  dispatch, but the workspace's panes can move in between. The immutable ID
+  dispatch, but the Checkout's panes can move in between. The immutable ID
   still prevents targeting a same-name replacement. **TODO:** repeat attribution
   immediately before dispatch to narrow the logical race.
-- **Overlay refresh errors look like an empty result.** The fallback picker loses
-  the status of its refresh subprocess and can display “No running jails” after
-  a Podman, snapshot, or attribution failure. **TODO:** preserve the previous
-  list and display an explicit refresh error.
 - **Native choices expose at most 32 jails.** Herdr permits 64 choices and each
   jail consumes an Open and Close row. This is an intentional bounded-provider
-  limit; use the fallback picker if a workspace exceeds it. Pagination can be
+  limit; use the fallback picker if a Checkout exceeds it. Pagination can be
   added if this becomes a practical constraint.
 
 ## Known limitations
@@ -188,12 +171,9 @@ silently treated as guarantees:
   can still start un-jailed. The watchdog *detects and flags* that after the
   fact (via `pane.agent_detected`) but cannot prevent it. ("Attempt to
   enforce" — hardening is future work.)
-- **The jail tree is a pane, not a sidebar node.** Herdr's plugin API has no
-  workspace-tree/sidebar extension surface (the workspace→tab→pane hierarchy is
-  fixed), so jails are visualized in a dedicated plugin pane rather than nested
-  under workspaces in the native sidebar. The alternative — decorating existing
-  rows via `pane report-metadata` tokens — is used by the enforcement watchdog
-  to mark un-jailed panes.
+- **The Jail Tree is supplementary.** Live jail resources are actionable
+  children beneath Checkouts in Spaces; the Jail Tree pane remains a separate
+  overview surface.
 - `pane.created` / `workspace.created` event payloads are not fully documented
   upstream; the plugin relies on `agent`/`pane_id` fields observed at runtime.
 
@@ -205,7 +185,8 @@ bin/lib.sh          shared helpers: PATH fixup, jail discovery
 bin/jail-run.sh     action: launch agent jailed (+ parent-jail reuse)
 bin/enforce.sh      event handler: flag un-jailed agents
 bin/jail-tree.sh    pane: gather data, render loop
-bin/group.py        jail→workspace grouping (deepest-ancestor attribution)
+bin/resource-graph.py complete validated jail→Checkout attachment graph
+bin/group.py        Jail Tree grouping (deepest-ancestor attribution)
 bin/open-tree.sh    action: open the jail-tree pane
 bin/jail-menu-provider.sh  native action choices provider
 bin/jail-menu.sh    selected-choice validation/invocation + overlay fallback

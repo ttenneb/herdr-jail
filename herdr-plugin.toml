@@ -1,21 +1,21 @@
 id = "hs.jail"
 name = "Herdr Jail"
 version = "0.1.0"
-min_herdr_version = "0.7.0"
-description = "Run coding agents inside yolo-jail sandboxes: reuse a parent workspace's jail, enforce jailing for supported agents, and visualize running jails per workspace."
+# PROVISIONAL: 0.7.6 is the planned first resource-capable release. Confirm it
+# contains Workspace Resources before publishing this plugin version.
+min_herdr_version = "0.7.6"
+description = "Run coding agents inside yolo-jail sandboxes: reuse a parent Checkout's jail, enforce jailing for supported agents, and visualize running jails per Checkout."
 platforms = ["macos", "linux"]
 
-# --- Feature #3 (native sidebar): keep each workspace row's $jails token live ---
-# Requires a matching row layout in ~/.config/herdr/config.toml:
-#   [ui.sidebar.spaces]
-#   rows = [["state_icon", "workspace"], ["branch", "git_status", "$jails"]]
+# Report structured, transient Jail Workspace Resources below their Checkouts.
+# No custom sidebar row/token configuration is required.
 [[startup]]
 command = ["bash", "bin/jails-refresher.sh"]
 
 # --- Feature #2 (sanctioned entry) + #1 (parent-jail reuse) ---
-# Launch the workspace's agent inside a jail. Wraps the agent in `yolo --`,
+# Launch the Checkout's agent inside a jail. Wraps the agent in `yolo --`,
 # and if an ancestor directory already has a running jail in the SAME Herdr
-# workspace, prompts to reuse it instead of spawning a new one.
+# Checkout, prompts to reuse it instead of spawning a new one.
 [[actions]]
 id = "run"
 title = "Run agent in jail"
@@ -39,9 +39,10 @@ command = ["bash", "bin/migrate.sh"]
 on = "pane.agent_detected"
 command = ["bash", "bin/enforce.sh"]
 
-# --- Feature #3 (visualize jails per workspace) ---
-# A plugin-owned pane that renders running jails grouped under their Herdr
-# workspaces. (Herdr has no sidebar/tree extension API, so this is a pane TUI.)
+# --- Feature #3 (supplementary Jail Tree overview) ---
+# Workspace Resources render actionable jail children beneath Checkouts in
+# Spaces. This plugin-owned pane remains a separate overview grouped by Herdr
+# Checkouts.
 [[panes]]
 id = "tree"
 title = "Jail Tree"
@@ -51,18 +52,18 @@ command = ["bash", "bin/jail-tree.sh"]
 [[actions]]
 id = "open-tree"
 title = "Open Jail Tree"
-description = "Show running yolo-jails grouped by Herdr workspace."
+description = "Show running yolo-jails grouped by Herdr Checkouts."
 contexts = ["workspace", "pane"]
 command = ["bash", "bin/open-tree.sh"]
 
-# --- Workspace context: open/close jails attached to a workspace ---
+# --- Checkout aggregate and exact Workspace Resource jail actions ---
 # Herdr resolves one native choice per live Open/Close operation. The normal
 # action remains callable and opens the overlay picker when no choice is set.
 [[actions]]
 id = "jails"
 title = "Jails…"
-description = "Open or close the yolo-jails attached to this workspace."
-contexts = ["workspace"]
+description = "Open or close the yolo-jails attached to this Checkout."
+contexts = ["workspace", "workspace_resource"]
 command = ["bash", "bin/jail-menu.sh"]
 choices_command = ["bash", "bin/jail-menu-provider.sh"]
 

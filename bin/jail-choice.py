@@ -1,127 +1,62 @@
 #!/usr/bin/env python3
-"""Encode and strictly decode Herdr jail action choices."""
+"""Strict action choices bound to immutable IDs and attachment fingerprints."""
+import argparse, hashlib, json, re, sys
+NAME = re.compile(r"yolo-[A-Za-z0-9][A-Za-z0-9_.-]*\Z"); CID = re.compile(r"[0-9a-f]{64}\Z")
+WID = re.compile(r"[^\t\r\n]{1,120}\Z"); FP = re.compile(r"[0-9a-f]{64}\Z")
+OPS = {"open", "close"}
 
-import argparse
-import json
-import re
-import sys
-
-CONTAINER_NAME_RE = re.compile(r"yolo-[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
-CONTAINER_ID_RE = re.compile(r"[0-9a-f]{64}\Z")
-OPERATIONS = {"open", "close"}
-DISPLAY_NAME_LIMIT = 32
-DISPLAY_NAME_SUFFIX = 8
-
-
-def valid_container_name(value):
-    return isinstance(value, str) and len(value) <= 114 and CONTAINER_NAME_RE.fullmatch(value) is not None
-
-
-def valid_container_id(value):
-    return isinstance(value, str) and CONTAINER_ID_RE.fullmatch(value) is not None
-
-
-def display_name(container_name):
-    name = container_name.removeprefix("yolo-")
-    if len(name) <= DISPLAY_NAME_LIMIT:
-        return name
-    prefix_length = DISPLAY_NAME_LIMIT - DISPLAY_NAME_SUFFIX - 1
-    return f"{name[:prefix_length]}…{name[-DISPLAY_NAME_SUFFIX:]}"
-
-
-def label(operation, container_name):
-    verb = "Open" if operation == "open" else "Close"
-    return f"{verb} {display_name(container_name)}"
-
-
+def display(name):
+    name = name.removeprefix("yolo-")
+    return name if len(name) <= 32 else name[:23] + "…" + name[-8:]
+def fingerprint(items): return hashlib.sha256(json.dumps(items, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+def valid(name, cid, attachments, fp):
+    return bool(NAME.fullmatch(name) and len(name)<=114 and CID.fullmatch(cid) and attachments and
+                len(attachments)<=32 and len(set(attachments)) == len(attachments) and
+                attachments == sorted(attachments, key=lambda x:x.encode()) and
+                all(WID.fullmatch(item) for item in attachments) and FP.fullmatch(fp) and fingerprint(attachments)==fp)
+def label(op, name, attachments):
+    suffix = f" (shared {len(attachments)}; affects all)" if op == "close" and len(attachments) > 1 else ""
+    return ("Open " if op == "open" else "Close ") + display(name) + suffix
 def emit():
-    mappings = []
-    for raw in sys.stdin:
-        fields = raw.rstrip("\n").split("\t")
-        if len(fields) != 4 or not valid_container_name(fields[0]) or not valid_container_id(fields[3]):
-            continue
-        mappings.append(tuple(fields))
-
-    # Provider order must not depend on Podman/snapshot iteration order. All
-    # protocol fields are UTF-8; sorting encoded fields gives bytewise order.
-    mappings.sort(key=lambda fields: tuple(field.encode("utf-8") for field in fields))
-    choices = []
-    seen = set()
-    for container_name, _directory, _kind, container_id in mappings:
-        for operation in ("open", "close"):
-            choice_id = f"{operation}:{container_id}"
-            if choice_id in seen:
-                continue
-            seen.add(choice_id)
-            choices.append({
-                "id": choice_id,
-                "label": label(operation, container_name),
-                "payload": {
-                    "operation": operation,
-                    "container": {"name": container_name, "id": container_id},
-                },
-            })
-            if len(choices) == 64:
-                break
-        if len(choices) == 64:
-            break
-    json.dump({"version": 1, "choices": choices}, sys.stdout, separators=(",", ":"))
-    sys.stdout.write("\n")
-    return 0
-
-
-def strict_object(pairs):
-    value = {}
-    for key, item in pairs:
-        if key in value:
-            raise ValueError(f"duplicate JSON key: {key}")
-        value[key] = item
-    return value
-
-
+    rows=[]
+    for line in sys.stdin:
+        fields=line.rstrip("\n").split("\t")
+        if len(fields)!=6: continue
+        name, directory, kind, cid, raw_attachments, fp=fields
+        attachments=raw_attachments.split(",") if raw_attachments else []
+        if valid(name,cid,attachments,fp): rows.append((name,directory,kind,cid,attachments,fp))
+    rows.sort(key=lambda row: tuple(str(x).encode() for x in row[:4]))
+    choices=[]; seen=set()
+    for name, _, _, cid, attachments, fp in rows:
+        for op in ("open","close"):
+            identifier=f"{op}:{cid}"
+            if identifier in seen: continue
+            seen.add(identifier)
+            choices.append({"id":identifier,"label":label(op,name,attachments),"payload":{"operation":op,"container":{"name":name,"id":cid,"attachments":attachments,"attachment_fingerprint":fp}}})
+            if len(choices)==64: break
+        if len(choices)==64: break
+    print(json.dumps({"version":1,"choices":choices},separators=(",",":"),ensure_ascii=False))
+def pairs(items):
+    result={}
+    for key,value in items:
+        if key in result: raise ValueError("duplicate JSON key")
+        result[key]=value
+    return result
 def parse():
+    try: value=json.load(sys.stdin,object_pairs_hook=pairs,parse_constant=lambda _:(_ for _ in ()).throw(ValueError()))
+    except Exception as error: print(f"invalid choice JSON: {error}",file=sys.stderr); return 1
     try:
-        value = json.load(
-            sys.stdin,
-            object_pairs_hook=strict_object,
-            parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"invalid constant: {value}")),
-        )
-    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
-        print(f"invalid choice JSON: {error}", file=sys.stderr)
-        return 1
-
-    if not isinstance(value, dict) or set(value) != {"id", "label", "payload"}:
-        print("choice must contain exactly id, label, and payload", file=sys.stderr)
-        return 1
-    payload = value.get("payload")
-    if not isinstance(payload, dict) or set(payload) != {"operation", "container"}:
-        print("choice payload must contain exactly operation and container", file=sys.stderr)
-        return 1
-    operation, container = payload.get("operation"), payload.get("container")
-    if operation not in OPERATIONS:
-        print("unsupported jail operation", file=sys.stderr)
-        return 1
-    if not isinstance(container, dict) or set(container) != {"name", "id"}:
-        print("container must contain exactly name and id", file=sys.stderr)
-        return 1
-    container_name, container_id = container.get("name"), container.get("id")
-    if not valid_container_name(container_name) or not valid_container_id(container_id):
-        print("invalid jail container", file=sys.stderr)
-        return 1
-    if value.get("id") != f"{operation}:{container_id}" or value.get("label") != label(operation, container_name):
-        print("choice identity does not match its payload", file=sys.stderr)
-        return 1
-
-    print(f"{operation}\t{container_name}\t{container_id}")
-    return 0
-
-
+        if not isinstance(value,dict) or set(value)!={"id","label","payload"}: raise ValueError()
+        payload=value["payload"]
+        if not isinstance(payload,dict) or set(payload)!={"operation","container"}: raise ValueError()
+        op=payload["operation"]; container=payload["container"]
+        if op not in OPS or not isinstance(container,dict) or set(container)!={"name","id","attachments","attachment_fingerprint"}: raise ValueError()
+        name,cid,attachments,fp=container["name"],container["id"],container["attachments"],container["attachment_fingerprint"]
+        if not isinstance(attachments,list) or not all(isinstance(x,str) for x in attachments) or not valid(name,cid,attachments,fp): raise ValueError()
+        if value["id"] != f"{op}:{cid}" or value["label"] != label(op,name,attachments): raise ValueError()
+    except (KeyError,ValueError,TypeError): print("choice identity does not match its payload",file=sys.stderr); return 1
+    print("\t".join((op,name,cid,",".join(attachments),fp))); return 0
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("emit", "parse"))
-    args = parser.parse_args()
-    return emit() if args.mode == "emit" else parse()
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    mode=argparse.ArgumentParser(); mode.add_argument("mode",choices=("emit","parse")); args=mode.parse_args()
+    return emit() if args.mode=="emit" else parse()
+if __name__=="__main__": raise SystemExit(main())

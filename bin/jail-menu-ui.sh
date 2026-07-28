@@ -26,20 +26,25 @@ display_name() {
 
 # Gather this workspace's jails: TSV lines "<container>\t<host_dir>\t<kind>"
 gather() {
-  local jf snap
-  jf="$(mktemp)"; snap="$(mktemp)"
-  if ! list_jails >"$jf" 2>/dev/null || ! "$HERDR" api snapshot >"$snap" 2>/dev/null; then
+  local jf wf snap
+  jf="$(mktemp)"; wf="$(mktemp)"; snap="$(mktemp)"
+  if ! list_jails >"$jf" || ! "$HERDR" workspace list >"$wf" || ! "$HERDR" api snapshot >"$snap"; then
     log "overlay could not refresh live jail state"
-    rm -f "$jf" "$snap"
+    rm -f "$jf" "$wf" "$snap"; return 1
+  fi
+  if ! python3 "$here/resource-graph.py" --workspace "$WID" --jails "$jf" --workspaces "$wf" --snapshot "$snap"; then
+    rm -f "$jf" "$wf" "$snap"
     return 1
   fi
-  python3 "$here/jail-agent-for-ws.py" --workspace "$WID" --jails "$jf" --snapshot "$snap" 2>/dev/null
-  rm -f "$jf" "$snap"
+  rm -f "$jf" "$wf" "$snap"
 }
 
 draw() {
   clear 2>/dev/null || printf '\033[2J\033[H'
   printf '%s Jails — %s %s\n\n' "$C_T" "${WID:-?}" "$C_R"
+  if [ -n "${OVERLAY_ERROR:-}" ]; then
+    printf '  %sRefresh failed: %s. Showing the previous verified list.%s\n\n' "$C_W" "$OVERLAY_ERROR" "$C_R"
+  fi
   if [ "${#JAILS[@]}" -eq 0 ]; then
     printf '  %sNo running jails for this workspace.%s\n\n' "$C_D" "$C_R"
     printf '  %s[r]%s refresh   %s[q]%s close\n' "$C_A" "$C_R" "$C_A" "$C_R"
@@ -47,11 +52,15 @@ draw() {
   fi
   local i=1 line container dir kind short shown
   for line in "${JAILS[@]}"; do
-    IFS=$'\t' read -r container dir kind <<<"$line"
+    IFS=$'\t' read -r container dir kind identity attachments fingerprint <<<"$line"
     short="${container#yolo-}"
     shown="$(display_name "$container")"
     printf '  %s%d.%s %s  %s(%s, agent: %s)%s\n' "$C_T" "$i" "$C_R" "$short" "$C_D" "$dir" "$kind" "$C_R"
-    printf '       %s[o%d]%s Open %s    %s[c%d]%s Close %s\n\n' "$C_A" "$i" "$C_R" "$shown" "$C_W" "$i" "$C_R" "$shown"
+    if [ "${attachments#*,}" != "$attachments" ]; then
+      printf '       %s[o%d]%s Open %s    %s[c%d]%s Close %s %s(shared %s; affects all attachments)%s\n\n' "$C_A" "$i" "$C_R" "$shown" "$C_W" "$i" "$C_R" "$shown" "$C_W" "$(printf '%s' "$attachments" | awk -F, '{print NF}')" "$C_R"
+    else
+      printf '       %s[o%d]%s Open %s    %s[c%d]%s Close %s\n\n' "$C_A" "$i" "$C_R" "$shown" "$C_W" "$i" "$C_R" "$shown"
+    fi
     i=$((i + 1))
   done
   printf '  %s[r]%s refresh   %s[q]%s close\n' "$C_A" "$C_R" "$C_A" "$C_R"
@@ -60,14 +69,18 @@ draw() {
 
 # Load jails into the JAILS array (bash 3.2 compatible — no mapfile).
 reload() {
+  local _line tmp="$(mktemp)"
+  if ! gather >"$tmp"; then
+    OVERLAY_ERROR="Podman or Herdr attribution could not be verified"
+    rm -f "$tmp"
+    return 1
+  fi
   JAILS=()
-  local _line
-  while IFS= read -r _line; do
-    [ -n "$_line" ] && JAILS+=("$_line")
-  done < <(gather)
+  while IFS= read -r _line; do [ -n "$_line" ] && JAILS+=("$_line"); done <"$tmp"
+  rm -f "$tmp"; OVERLAY_ERROR=""
 }
 
-reload
+JAILS=(); OVERLAY_ERROR=""; reload || true
 while true; do
   draw
   printf '\n> '
@@ -78,12 +91,11 @@ while true; do
     o[0-9]*|c[0-9]*)
       act="${cmd:0:1}"; idx="${cmd:1}"
       if [ "$idx" -ge 1 ] 2>/dev/null && [ "$idx" -le "${#JAILS[@]}" ]; then
-        IFS=$'\t' read -r container dir kind <<<"${JAILS[$((idx-1))]}"
+        IFS=$'\t' read -r container dir kind identity attachments fingerprint <<<"${JAILS[$((idx-1))]}"
         operation="close"; [ "$act" = "o" ] && operation="open"
         # Route fallback selections through the same strict, fresh validation as
         # native choices. The selected choice remains in the environment.
-        identity="$(container_identity "$container" 2>/dev/null || true)"
-        choice_json="$(printf '%s\t%s\t%s\t%s\n' "$container" "$dir" "$kind" "$identity" \
+        choice_json="$(printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$container" "$dir" "$kind" "$identity" "$attachments" "$fingerprint" \
           | python3 "$here/jail-choice.py" emit \
           | jq -cer --arg id "$operation:$identity" '.choices[] | select(.id == $id)' 2>/dev/null || true)"
         context_json="$(jq -nc --arg workspace_id "$WID" --arg workspace_cwd "$REPO_DIR" \
@@ -98,6 +110,11 @@ while true; do
             HERDR_PLUGIN_ACTION_CHOICE_JSON="$choice_json" bash "$here/jail-menu.sh"
           break   # tab created + focused; close the picker
         else
+          if [ "${attachments#*,}" != "$attachments" ]; then
+            printf '\n%sClose affects every attached Checkout (%s). Type yes to continue: %s' "$C_W" "$attachments" "$C_R"
+            IFS= read -r confirm
+            [ "$confirm" = "yes" ] || continue
+          fi
           printf '\n%sClosing jail %s...%s\n' "$C_W" "${container#yolo-}" "$C_R"
           HERDR_WORKSPACE_ID="$WID" HERDR_PLUGIN_CONTEXT_JSON="$context_json" \
             HERDR_PLUGIN_ACTION_CHOICE_JSON="$choice_json" bash "$here/jail-menu.sh" || true
